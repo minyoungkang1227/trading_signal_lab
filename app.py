@@ -58,11 +58,50 @@ COLUMN_LABELS = {
 }
 DIRECTION_LABELS = {"LONG": "상승(롱)", "SHORT": "하락(숏)"}
 
+# 사이드바 종목 선택 드롭다운에 쓸 예시 종목. 종목코드를 모르는 사람도 몇 번 눌러보며
+# 바로 써볼 수 있게 하기 위함 — 여기 없는 종목은 '직접 입력'을 고르면 된다.
+KRX_EXAMPLES = {
+    "005930": "삼성전자 (005930)",
+    "000660": "SK하이닉스 (000660)",
+    "035420": "NAVER (035420)",
+    "035720": "카카오 (035720)",
+    "005380": "현대차 (005380)",
+}
+UPBIT_EXAMPLES = {
+    "KRW-BTC": "비트코인 (KRW-BTC)",
+    "KRW-ETH": "이더리움 (KRW-ETH)",
+    "KRW-XRP": "리플 (KRW-XRP)",
+    "KRW-SOL": "솔라나 (KRW-SOL)",
+}
+DIRECT_INPUT = "직접 입력"
+
 
 def build_args(**overrides) -> types.SimpleNamespace:
     cfg = dict(DEFAULTS)
     cfg.update(overrides)
     return types.SimpleNamespace(**cfg)
+
+
+def is_owner() -> bool:
+    """공개 배포된 주소에는 누구나 들어올 수 있어서, '체결 로그 기록' 같은 본인 전용
+    기능은 기본적으로 숨긴다. Streamlit Cloud의 Secrets에 OWNER_TOKEN을 등록해두고
+    (이 값은 .gitignore에 걸린 secrets.toml에만 있어 깃허브 공개 저장소에는 올라가지
+    않는다), 주소 끝에 ?owner=<그 값>을 붙여서 접속했을 때만 본인으로 인식한다.
+    로컬에서 secrets.toml 없이 돌릴 때는 조용히 False로 처리한다.
+    """
+    try:
+        token = st.secrets.get("OWNER_TOKEN")
+    except Exception:
+        token = None
+    if not token:
+        return False
+    try:
+        return st.query_params.get("owner") == token
+    except Exception:
+        return False
+
+
+IS_OWNER = is_owner()
 
 
 st.set_page_config(page_title="trading_signal_lab 대시보드", layout="wide")
@@ -94,11 +133,21 @@ with st.sidebar:
         "시장", ["krx", "upbit"], index=0,
         format_func=lambda v: {"krx": "국내 주식 (KRX)", "upbit": "업비트 코인"}[v],
     )
-    symbol = st.text_input(
-        "종목코드", value="005930" if market == "krx" else "KRW-BTC",
-        help="국내 주식은 '005930'(삼성전자)처럼 6자리 종목코드, "
-             "업비트는 'KRW-BTC'처럼 '원화마켓-코인심볼' 형식으로 입력하세요.",
+    examples = KRX_EXAMPLES if market == "krx" else UPBIT_EXAMPLES
+    symbol_choice = st.selectbox(
+        "종목 선택", list(examples.keys()) + [DIRECT_INPUT],
+        format_func=lambda c: examples.get(c, "✏️ 직접 입력 (종목코드를 아는 경우)"),
+        help="자주 찾는 종목 몇 개를 바로 고를 수 있게 모아뒀습니다. 목록에 없는 "
+             "종목은 맨 아래 '직접 입력'을 고르세요.",
     )
+    if symbol_choice == DIRECT_INPUT:
+        symbol = st.text_input(
+            "종목코드 직접 입력", value="005930" if market == "krx" else "KRW-BTC",
+            help="국내 주식은 '005930'(삼성전자)처럼 6자리 종목코드, "
+                 "업비트는 'KRW-BTC'처럼 '원화마켓-코인심볼' 형식으로 입력하세요.",
+        )
+    else:
+        symbol = symbol_choice
     if market == "krx":
         start = st.text_input(
             "시작일 (YYYYMMDD)", value="20200101",
@@ -130,105 +179,156 @@ with st.sidebar:
              "일봉 기준이면 '5'는 신호 발생 5거래일 뒤라는 뜻입니다.",
     )
 
-    st.header("2. 체결 기록 (선택)")
-    st.caption(
-        "메타라벨링(나중에 어떤 신호가 더 믿을 만한지 머신러닝으로 다시 거르는 작업)을 "
-        "위한 준비 단계입니다. 지금 당장 필요 없다면 꺼둔 채로 실행해도 결과 확인에는 "
-        "아무 지장이 없습니다."
-    )
-    log_executions = st.checkbox(
-        "이번 실행의 신호를 체결 로그 파일에 기록하기", value=False,
-        help="이번 실행에서 나온 신호 하나하나를 output/execution_log.csv 파일에 "
-             "계속 누적해서 쌓아둡니다. 나중에 메타라벨링 모델을 학습시킬 때 쓸 원재료를 "
-             "미리 모아두는 용도입니다. 참고: 청산 사유(exit_reason)는 전부 '보유기간 "
-             "만료(horizon_exit)'로 기록되며, 실제 손절/익절 로직이 적용된 건 아닙니다.",
-    )
-
-    with st.expander("3. 고급 설정 — 체결 가정 · 다중검정 보정"):
+    # 체결 로그 기록은 배포자 본인의 메타라벨링 작업용 기능이라, 공개 주소로 들어온
+    # 일반 방문자에게는 아예 보이지 않게 한다 — 여러 사람이 같은 서버의 같은 파일에
+    # 동시에 기록을 남기면 서로 내용이 섞여버리는 문제도 막을 수 있다.
+    if IS_OWNER:
+        st.header("2. 체결 기록 (선택, 관리자 전용)")
         st.caption(
-            "실제로 거래했다면 어떤 조건으로 진입했을지, 그리고 여러 신호를 한꺼번에 "
-            "비교할 때 생기는 통계적 착시를 어떻게 보정할지에 대한 설정입니다. 잘 모르겠으면 "
-            "기본값 그대로 두어도 됩니다."
+            "메타라벨링(나중에 어떤 신호가 더 믿을 만한지 머신러닝으로 다시 거르는 작업)을 "
+            "위한 준비 단계입니다. 지금 당장 필요 없다면 꺼둔 채로 실행해도 결과 확인에는 "
+            "아무 지장이 없습니다."
         )
+        log_executions = st.checkbox(
+            "이번 실행의 신호를 체결 로그 파일에 기록하기", value=False,
+            help="이번 실행에서 나온 신호 하나하나를 output/execution_log.csv 파일에 "
+                 "계속 누적해서 쌓아둡니다. 나중에 메타라벨링 모델을 학습시킬 때 쓸 원재료를 "
+                 "미리 모아두는 용도입니다. 참고: 청산 사유(exit_reason)는 전부 '보유기간 "
+                 "만료(horizon_exit)'로 기록되며, 실제 손절/익절 로직이 적용된 건 아닙니다.",
+        )
+    else:
+        log_executions = False
+
+    with st.expander("3. 고급 설정 (선택) — 더 현실적으로, 더 엄격하게"):
+        st.caption(
+            "기본값 그대로 둬도 결과를 보는 데는 전혀 문제없습니다. 아래는 '실제로 거래했다면 "
+            "어땠을까'를 더 현실에 가깝게 보거나, 결과를 더 깐깐하게 검증하고 싶을 때만 "
+            "건드리면 되는 선택 항목입니다."
+        )
+
+        st.markdown("**① 실제로 거래했다면?**")
         entry_lag = st.number_input(
-            "진입 지연 (봉 수)", value=0, step=1,
-            help="신호가 뜬 당일 바로 진입하지 않고 몇 봉 뒤에 진입할지. 0이면 신호 당일 진입.",
+            "신호 발생 후 며칠(봉) 뒤에 살까요?", value=0, step=1,
+            help="0이면 신호가 뜬 바로 그날 매수한다고 가정합니다. 예: 1이면 신호 다음날 매수.",
         )
         entry_col = st.selectbox(
-            "진입 가격 기준", [None, "open", "close"], index=0,
+            "그날 매수 가격은 어디 기준?", [None, "open", "close"], index=0,
             format_func=lambda v: {
-                None: "기본값 (진입 지연만 반영)", "open": "시가 기준", "close": "종가 기준",
+                None: "기본값 (별도 지정 안 함)", "open": "시가 (장 시작가)", "close": "종가 (장 마감가)",
             }[v],
-            help="진입 가격을 그날의 시가로 할지 종가로 할지. 기본값은 진입 지연 설정만 반영합니다.",
+            help="매수 체결가를 시가로 볼지 종가로 볼지 고릅니다. 잘 모르면 기본값으로 둬도 됩니다.",
         )
-        cost_bps = st.number_input(
-            "거래수수료 (왕복, bp)", value=0.0, step=1.0,
-            help="사고팔 때 드는 수수료를 bp(1bp=0.01%) 단위로 가정해서 수익률에서 뺍니다.",
-        )
-        slippage_bps = st.number_input(
-            "슬리피지 (왕복, bp)", value=0.0, step=1.0,
-            help="주문가와 실제 체결가의 차이(미끄러짐)를 bp 단위로 가정해서 수익률에서 뺍니다.",
-        )
+        cost_col, slip_col = st.columns(2)
+        with cost_col:
+            cost_bps = st.number_input(
+                "수수료 (bp, 왕복)", value=0.0, step=1.0,
+                help="사고팔 때 나가는 수수료. 1bp = 0.01%예요 — 예를 들어 왕복 수수료가 "
+                     "0.015%라면 1.5를 입력하면 됩니다. 모르면 0으로 둬도 됩니다.",
+            )
+        with slip_col:
+            slippage_bps = st.number_input(
+                "슬리피지 (bp, 왕복)", value=0.0, step=1.0,
+                help="원하는 가격과 실제 체결가의 차이(미끄러짐). 수수료와 같은 bp 단위입니다.",
+            )
+
+        st.divider()
+        st.markdown("**② 이 결과, 얼마나 믿을 수 있나요?**")
         newey_west = st.checkbox(
-            "Newey-West 표준오차 보정 적용", value=False,
-            help="수익률 간에 자기상관이 있으면 t값이 실제보다 부풀려질 수 있는데, 이를 "
-                 "보정해서 더 보수적인(엄격한) t값을 계산합니다.",
+            "더 엄격한 통계 보정 적용하기 (Newey-West)", value=False,
+            help="수익률이 하루하루 비슷하게 이어지는(자기상관) 경향이 있으면 t값이 실제보다 "
+                 "커 보일 수 있습니다. 이 보정을 켜면 좀 더 보수적인(깐깐한) t값을 계산합니다.",
         )
         drop_overlapping = st.checkbox(
-            "겹치는 이벤트는 하나만 남기기", value=False,
-            help="같은 보유기간 안에 신호가 또 뜨면 서로 겹치는 구간이 생겨 표본이 "
-                 "독립적이지 않게 되는데, 이를 막기 위해 겹치는 신호를 솎아냅니다.",
+            "겹치는 신호는 한 번만 세기", value=False,
+            help="신호가 연달아 떠서 보유기간이 서로 겹치면 사실상 같은 구간을 중복으로 "
+                 "세는 셈입니다. 이를 막고 더 독립적인 표본만 남기고 싶을 때 켭니다.",
         )
-        fdr = st.number_input(
-            "다중검정 허용 오류율 (FDR)", value=0.10, min_value=0.01, max_value=0.5, step=0.01,
-            help="여러 신호 x 방향 x 보유기간 조합을 한꺼번에 비교하면 그중 일부는 우연히 "
-                 "유의하게 나올 수 있습니다(Benjamini-Hochberg 보정). 값이 작을수록 더 "
-                 "엄격한 기준으로 '진짜 유의한' 신호만 통과시킵니다.",
+        fdr = st.slider(
+            "여러 신호를 동시에 비교할 때 허용할 오차 수준", 0.01, 0.50, 0.10, step=0.01,
+            help="지표 여러 개를 한꺼번에 비교하다 보면 그중 일부는 순전히 운으로 좋아 "
+                 "보일 수 있습니다(통계 용어로 FDR). 낮출수록 더 엄격하게, '진짜' 신호만 "
+                 "통과시킵니다.",
         )
         t_threshold = st.number_input(
-            "판정 기준 t값", value=3.0, step=0.1,
-            help="신호를 '쓸 만하다'고 판정할 때 기준으로 삼을 t값의 최소 크기.",
+            "신호의 '합격선'으로 볼 t값", value=3.0, step=0.5,
+            help="이 값보다 커야 믿을 만한 신호로 봅니다. 보통 통계에서는 절댓값 2 이상이면 "
+                 "눈여겨볼 만하다고 보는데, 여기서는 더 엄격하게 3.0을 기본값으로 뒀습니다.",
         )
 
-    with st.expander("4. 콤보필터 파라미터 — 캔들+거래량 진입 필터"):
+    with st.expander("4. 콤보필터 — 캔들 모양 + 거래량으로 신호 거르기"):
         st.caption(
-            "원본 Pine Script 지표(candle_volume_entry_filter)를 그대로 포팅한 콤보필터의 "
-            "세부 조건입니다. '몸통이 크고 꼬리는 짧은 캔들 + 평소보다 많은 거래량 + 추세 "
-            "방향 일치'를 모두 만족할 때만 신호로 인정합니다."
+            "캔들 하나하나의 생김새(몸통이 크고 꼬리는 짧은지), 그 순간 거래량이 평소보다 "
+            "많이 터졌는지, 그리고 전체적인 추세 방향과 맞는지를 한꺼번에 점수로 매겨서, "
+            "일정 점수를 넘을 때만 신호로 인정하는 필터입니다. (TradingView에 있던 원본 "
+            "Pine Script 지표 'candle_volume_entry_filter'를 그대로 옮겨온 것입니다.)"
         )
-        combo_body_min_pct = st.number_input(
-            "캔들 몸통 비율 최소값 (%)", value=55.0,
-            help="캔들 전체 길이(고가-저가) 대비 몸통(시가-종가)이 최소 몇 % 이상이어야 "
-                 "'힘있는' 캔들로 인정할지.",
+
+        combo_advanced = st.checkbox(
+            "세부 수치를 직접 조정하고 싶어요 (전문가용)", value=False,
+            help="끄면 아래 설명대로의 검증된 기본값을 그대로 사용합니다.",
         )
-        combo_wick_max_pct = st.number_input(
-            "꼬리 비율 최대값 (%)", value=25.0,
-            help="위/아래 꼬리가 캔들 전체 길이의 몇 %를 넘으면 신호에서 제외할지.",
-        )
-        combo_vol_len = st.number_input(
-            "거래량 비교 구간 (봉 수)", value=20, step=1,
-            help="최근 거래량이 평소보다 많은지 비교할 때, 몇 봉 평균과 비교할지.",
-        )
-        combo_vol_mult = st.number_input(
-            "거래량 배수 기준", value=1.6,
-            help="평균 거래량의 몇 배 이상 터져야 '거래량 확인됨'으로 볼지.",
-        )
-        combo_ma_len = st.number_input(
-            "이동평균 기간 (봉 수)", value=50, step=1,
-            help="추세 방향을 판단할 때 쓸 이동평균선의 기간.",
-        )
-        combo_ma_type = st.selectbox(
-            "이동평균 종류", ["EMA", "SMA", "WMA"], index=0,
-            format_func=lambda v: {
-                "EMA": "지수이동평균 (EMA)", "SMA": "단순이동평균 (SMA)", "WMA": "가중이동평균 (WMA)",
-            }[v],
-        )
-        combo_score_threshold = st.number_input(
-            "신호 점수 임계값 (0~1)", value=0.62, min_value=0.0, max_value=1.0,
-            help="여러 조건을 종합한 점수가 이 값 이상일 때만 신호로 인정합니다. "
-                 "원본 Pine Script가 채택한 값은 0.62이며, 이 대시보드로 직접 재검증하기 "
-                 "전까지는 '일단 원본 그대로'라는 참고용 값으로 취급하는 게 안전합니다.",
-        )
+
+        if not combo_advanced:
+            st.caption(
+                "지금은 기본값을 그대로 쓰고 있습니다 — 캔들 몸통이 전체 길이의 55% 이상, "
+                "위아래 꼬리는 25% 이하, 최근 20봉 평균 거래량의 1.6배 이상 터지고, 50봉 "
+                "지수이동평균(EMA) 방향과 일치하며, 이 조건들을 종합한 점수가 0.62 이상일 "
+                "때만 신호로 인정합니다. 체크박스를 켜면 이 숫자들을 직접 바꿀 수 있습니다."
+            )
+            combo_body_min_pct = DEFAULTS["combo_body_min_pct"]
+            combo_wick_max_pct = DEFAULTS["combo_wick_max_pct"]
+            combo_vol_len = DEFAULTS["combo_vol_len"]
+            combo_vol_mult = DEFAULTS["combo_vol_mult"]
+            combo_ma_len = DEFAULTS["combo_ma_len"]
+            combo_ma_type = DEFAULTS["combo_ma_type"]
+            combo_score_threshold = DEFAULTS["combo_score_threshold"]
+        else:
+            st.markdown("**캔들 모양 조건**")
+            combo_body_min_pct = st.number_input(
+                "몸통은 전체 길이의 최소 몇 %?", value=55.0,
+                help="캔들 전체 길이(고가-저가) 대비 몸통(시가-종가)이 이 비율 이상이어야 "
+                     "'힘있게 밀어붙인' 캔들로 봅니다. 높일수록 더 확실한 모양만 인정합니다.",
+            )
+            combo_wick_max_pct = st.number_input(
+                "꼬리는 전체 길이의 최대 몇 %까지 허용?", value=25.0,
+                help="위/아래 꼬리가 이 비율을 넘으면 '망설이다 되돌아온' 모양으로 보고 "
+                     "신호에서 제외합니다. 낮출수록 더 깔끔한 모양만 통과합니다.",
+            )
+
+            st.markdown("**거래량 조건**")
+            combo_vol_len = st.number_input(
+                "평균 거래량을 비교할 기간 (봉 수)", value=20, step=1,
+                help="최근 거래량이 '평소보다 많다'고 판단할 때, 몇 봉 평균을 기준으로 "
+                     "삼을지.",
+            )
+            combo_vol_mult = st.number_input(
+                "평균 대비 몇 배 이상이어야 '거래량 터짐'으로 볼까요?", value=1.6,
+                help="예: 1.6이면 위에서 정한 평균 거래량의 1.6배 이상일 때만 인정합니다. "
+                     "높일수록 확실히 큰 거래량만 통과합니다.",
+            )
+
+            st.markdown("**추세 방향 조건**")
+            combo_ma_len = st.number_input(
+                "추세 판단용 이동평균 기간 (봉 수)", value=50, step=1,
+                help="이 기간의 이동평균선 방향으로 전체 추세를 판단합니다.",
+            )
+            combo_ma_type = st.selectbox(
+                "이동평균 종류", ["EMA", "SMA", "WMA"], index=0,
+                format_func=lambda v: {
+                    "EMA": "지수이동평균 (EMA) — 최근 가격에 더 민감하게 반응",
+                    "SMA": "단순이동평균 (SMA) — 전체 구간을 동일한 비중으로",
+                    "WMA": "가중이동평균 (WMA) — 최근으로 갈수록 비중을 더 크게",
+                }[v],
+            )
+
+            st.markdown("**종합 판정**")
+            combo_score_threshold = st.number_input(
+                "종합 점수 기준 (0~1)", value=0.62, min_value=0.0, max_value=1.0,
+                help="위 세 가지 조건을 모두 합쳐 0~1 사이 점수로 매긴 뒤, 이 값 이상일 "
+                     "때만 신호로 인정합니다. 원본 Pine Script가 쓰던 값은 0.62이고, 이 "
+                     "대시보드로 직접 재검증해보기 전까지는 '일단 원본 그대로 따라간다'는 "
+                     "참고용 값 정도로 보는 게 안전합니다.",
+            )
 
     run_clicked = st.button("검증 실행", type="primary", use_container_width=True)
 
@@ -252,10 +352,17 @@ with st.spinner(f"{market}/{symbol} 데이터 수집 중..."):
     try:
         df = rb.load_data(args)
     except SystemExit as e:
-        st.error(f"데이터 수집 실패: {e}")
+        st.error("데이터를 가져오지 못했습니다. 종목 선택과 시작일/종료일 형식을 "
+                 "다시 확인해주세요 (예: 종목코드 005930, 날짜 20200101).")
+        with st.expander("자세한 오류 내용 보기 (문제 해결용)"):
+            st.code(str(e))
         st.stop()
     except Exception as e:
-        st.error(f"데이터 수집 중 오류: {e}")
+        st.error("데이터를 가져오는 중 문제가 발생했습니다. 종목코드가 맞는지, 혹은 "
+                 "데이터 제공처가 일시적으로 불안정한 건 아닌지 확인한 뒤 다시 "
+                 "시도해주세요.")
+        with st.expander("자세한 오류 내용 보기 (문제 해결용)"):
+            st.code(str(e))
         st.stop()
 
 st.success(f"{len(df)}봉 수집 완료 ({df.index.min().date()} ~ {df.index.max().date()})")
@@ -316,7 +423,7 @@ if not curve_df.empty:
 else:
     st.caption("플롯할 이벤트가 없습니다.")
 
-if log_executions:
+if log_executions and IS_OWNER:
     from backtest.execution_log import log_all_signals
     from pathlib import Path
 
