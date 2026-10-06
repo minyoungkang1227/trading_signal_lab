@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from data.collect import attach_fetch_meta, assert_unique_columns
+from data.collect import attach_fetch_meta, assert_unique_columns, assert_flat_columns
 
 
 def fetch_krx_ohlcv(ticker: str, start: str, end: str) -> pd.DataFrame:
@@ -37,13 +37,24 @@ def fetch_krx_ohlcv(ticker: str, start: str, end: str) -> pd.DataFrame:
 
     import yfinance as yf
     yf_ticker = f"{ticker}.KS"
+    # multi_level_index=False: yfinance(>=1.x)는 종목 1개만 받아도 기본값이
+    # True라 컬럼이 (필드, 티커) 2단 MultiIndex로 온다. 그 상태로 두면
+    # out["volume"]처럼 한 컬럼만 골라야 하는 자리에서 Series 대신 1열짜리
+    # DataFrame이 나와, 그보다 훨씬 뒤(지표 계산 단계)에서 알아보기 힘든
+    # pandas 내부 에러로 터진다(실제로 delta_trading.compute()에서 그렇게
+    # 터진 적이 있다) — 명시적으로 끄는 게 근본 수정.
     df = yf.download(yf_ticker, start=pd.to_datetime(start, format="%Y%m%d"),
-                      end=pd.to_datetime(end, format="%Y%m%d"), progress=False)
+                      end=pd.to_datetime(end, format="%Y%m%d"), progress=False,
+                      multi_level_index=False)
     if df.empty:
         raise RuntimeError(f"{ticker} 데이터를 pykrx/yfinance 둘 다에서 가져오지 못했습니다.")
     df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
                              "Close": "close", "Volume": "volume"})
     df = df[["open", "high", "low", "close", "volume"]].sort_index()
+    # 방어선 이중화: multi_level_index=False가 어떤 이유로든(향후 yfinance
+    # 기본값 변경, 다른 호출 경로 등) 안 먹었을 경우를 대비해 컬럼 구조
+    # 자체를 한 번 더 검증한다.
+    df = assert_flat_columns(df, context=f"krx/yfinance:{ticker}")
     df = assert_unique_columns(df, context=f"krx/yfinance:{ticker}")
     df.index.name = "date"
     return attach_fetch_meta(df, symbol=ticker, source="yfinance")

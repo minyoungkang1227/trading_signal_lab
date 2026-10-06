@@ -43,6 +43,38 @@ def attach_fetch_meta(obj: pd.DataFrame | pd.Series, symbol: str, source: str) -
     return obj
 
 
+def assert_flat_columns(df: pd.DataFrame, context: str) -> pd.DataFrame:
+    """컬럼이 MultiIndex가 아니라 평범한(flat) Index인지 확인한다.
+
+    assert_unique_columns()와는 별개의, 독립적인 검사다(원칙: 품질 체크는
+    하나로 뭉치지 않고 각각 따로 본다) — 컬럼 "이름이 겹치는" 문제와 컬럼
+    "구조 자체가 다단(MultiIndex)"인 문제는 원인도 증상도 다르다. 후자는
+    컬럼 이름 자체는 중복되지 않아 assert_unique_columns가 못 잡는다
+    (예: yfinance가 종목 1개 요청에도 (필드, 티커) 2단 컬럼을 반환하는
+    경우). MultiIndex가 섞여 있으면 out["volume"] 같은 단일 컬럼 선택이
+    Series 대신 DataFrame을 반환해, 그보다 한참 뒤(지표 계산 단계)에서
+    알아보기 힘든 pandas 내부 에러로 번진다. 레벨이 1개뿐이면(모든 하위
+    레벨이 실질적으로 비어있거나 전부 같은 값이면) 안전하게 평탄화하고
+    경고만 남기고, 그 외(레벨 안에 여러 값이 섞여 있는 경우)에는 어느
+    레벨을 표준 컬럼으로 써야 할지 스스로 판단하지 않고 예외를 던진다.
+    """
+    if not isinstance(df.columns, pd.MultiIndex):
+        return df
+    extra_levels = df.columns.droplevel(0)
+    if extra_levels.nunique(dropna=False) > 1:
+        raise RuntimeError(
+            f"[데이터 품질 오류][{context}] 컬럼이 다단(MultiIndex)이고 그 "
+            f"안에 서로 다른 값이 섞여 있습니다({extra_levels.unique().tolist()}) "
+            f"— 어떤 하위 레벨을 써야 할지 임의로 고를 수 없으니 원본 응답 "
+            f"구조를 확인하세요."
+        )
+    print(f"[데이터 품질 경고][{context}] 컬럼이 MultiIndex로 반환됐습니다"
+          f"(하위 레벨은 전부 동일값) — 첫 번째 레벨만 남기고 평탄화합니다.")
+    df = df.copy()
+    df.columns = df.columns.get_level_values(0)
+    return df
+
+
 def assert_unique_columns(df: pd.DataFrame, context: str) -> pd.DataFrame:
     """표준 OHLCV 컬럼 중복을 수집 직후에 즉시 잡아낸다(원칙: 이상한 데이터가
     보이면 그럴듯하게 설명하며 넘어가지 말고 멈춘다).
