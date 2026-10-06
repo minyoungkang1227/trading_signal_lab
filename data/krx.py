@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from data.collect import attach_fetch_meta
+from data.collect import attach_fetch_meta, assert_unique_columns
 
 
 def fetch_krx_ohlcv(ticker: str, start: str, end: str) -> pd.DataFrame:
@@ -29,6 +29,7 @@ def fetch_krx_ohlcv(ticker: str, start: str, end: str) -> pd.DataFrame:
             "종가": "close", "거래량": "volume",
         })
         df = df[["open", "high", "low", "close", "volume"]].sort_index()
+        df = assert_unique_columns(df, context=f"krx/pykrx:{ticker}")
         df.index.name = "date"
         return attach_fetch_meta(df, symbol=ticker, source="pykrx")
     except Exception as e:
@@ -43,6 +44,7 @@ def fetch_krx_ohlcv(ticker: str, start: str, end: str) -> pd.DataFrame:
     df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
                              "Close": "close", "Volume": "volume"})
     df = df[["open", "high", "low", "close", "volume"]].sort_index()
+    df = assert_unique_columns(df, context=f"krx/yfinance:{ticker}")
     df.index.name = "date"
     return attach_fetch_meta(df, symbol=ticker, source="yfinance")
 

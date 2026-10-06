@@ -43,6 +43,37 @@ def attach_fetch_meta(obj: pd.DataFrame | pd.Series, symbol: str, source: str) -
     return obj
 
 
+def assert_unique_columns(df: pd.DataFrame, context: str) -> pd.DataFrame:
+    """표준 OHLCV 컬럼 중복을 수집 직후에 즉시 잡아낸다(원칙: 이상한 데이터가
+    보이면 그럴듯하게 설명하며 넘어가지 말고 멈춘다).
+
+    소스 API가 같은 필드를 두 번 반환하면(예: yfinance/pykrx 응답 구조가
+    버전에 따라 바뀌는 경우) df["volume"]처럼 한 컬럼만 골라야 하는 자리에서
+    Series 대신 DataFrame이 나와, 그보다 훨씬 뒤(지표 계산 단계)에서
+    `ValueError: Cannot set a DataFrame with multiple columns to the single
+    column ...` 같은 알아보기 힘든 pandas 내부 에러로 터진다. 이 함수를 수집
+    함수 말미에서 호출해 그 자리에서 바로 잡는다.
+
+    중복된 두 컬럼의 값이 완전히 같으면(단순 중복 응답) 첫 컬럼만 남기고
+    경고만 출력한다. 값이 다르면 원본 응답 자체를 신뢰할 수 없다는 뜻이므로
+    예외를 던져 파이프라인을 멈춘다 — 조용히 하나를 골라 쓰면 안 된다.
+    """
+    if not df.columns.duplicated().any():
+        return df
+    dup_names = df.columns[df.columns.duplicated()].unique().tolist()
+    for name in dup_names:
+        block = df.loc[:, df.columns == name]
+        first = block.iloc[:, 0]
+        if not all(block.iloc[:, i].equals(first) for i in range(1, block.shape[1])):
+            raise RuntimeError(
+                f"[데이터 품질 오류][{context}] '{name}' 컬럼이 중복 수집됐고 "
+                f"값도 서로 달라 신뢰할 수 없습니다 — 원본 API 응답을 확인하세요."
+            )
+        print(f"[데이터 품질 경고][{context}] '{name}' 컬럼이 중복 수집됐습니다"
+              f"(값은 동일) — 첫 번째 컬럼만 사용합니다.")
+    return df.loc[:, ~df.columns.duplicated()]
+
+
 @dataclass
 class CollectResult:
     ok: dict = field(default_factory=dict)      # symbol -> DataFrame
