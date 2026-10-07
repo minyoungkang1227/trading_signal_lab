@@ -25,6 +25,16 @@ import streamlit as st
 
 import run_backtest as rb
 from backtest.engine import SIGNAL_SPECS
+from alerts.github_sync import (
+    GitHubSyncError, STRENGTH_LABELS, fetch_watchlist, items_to_rows, rows_to_items,
+    update_watchlist,
+)
+
+# alerts/check_signals.py(텔레그램 알림, GitHub Actions)가 읽는 바로 그 저장소/파일.
+# 아래 "5. 감시리스트 관리" 섹션은 이 경로를 직접 고쳐 쓴다 — 자세한 이유는
+# alerts/github_sync.py 모듈 docstring 참고.
+WATCHLIST_REPO = "minyoungkang1227/tradingsignallab"
+WATCHLIST_PATH = "alerts/watchlist.json"
 
 # run_backtest.py main()의 argparse 기본값과 1:1로 맞춘 기본 설정.
 # CLI에 새 --옵션이 추가되면 여기에도 같은 dest/default를 추가해야 함.
@@ -99,6 +109,16 @@ def is_owner() -> bool:
         return st.query_params.get("owner") == token
     except Exception:
         return False
+
+
+def github_token() -> str | None:
+    """감시리스트 관리 섹션이 GitHub 저장소에 쓰기 위한 토큰. OWNER_TOKEN과 같은 자리
+    (Streamlit Cloud Secrets)에 GITHUB_TOKEN으로 등록해둔다. 없으면 None — 그 경우
+    섹션 자체를 숨긴다(토큰 없이 시도했다가 애매한 에러를 보는 것보다 낫다)."""
+    try:
+        return st.secrets.get("GITHUB_TOKEN")
+    except Exception:
+        return None
 
 
 IS_OWNER = is_owner()
@@ -329,6 +349,72 @@ with st.sidebar:
                      "대시보드로 직접 재검증해보기 전까지는 '일단 원본 그대로 따라간다'는 "
                      "참고용 값 정도로 보는 게 안전합니다.",
             )
+
+    # 텔레그램 알림(GitHub Actions, alerts/check_signals.py)이 감시할 종목 목록을
+    # 여기서 직접 관리한다. 위쪽의 '검증 실행'과는 완전히 별개 기능이라 결과 화면에는
+    # 영향을 주지 않는다 — 공개 방문자에게는 아예 안 보이게 owner 전용으로 숨긴다
+    # (텔레그램 알림이 본인 한 명에게만 가는 개인용 기능이기 때문).
+    if IS_OWNER:
+        st.header("5. 감시리스트 관리 (관리자 전용, 텔레그램 알림용)")
+        _token = github_token()
+        if not _token:
+            st.caption(
+                "GITHUB_TOKEN이 Secrets에 등록돼 있지 않아 이 섹션을 쓸 수 없습니다 "
+                "(alerts/github_sync.py 모듈 docstring에 발급 방법 설명)."
+            )
+        else:
+            st.caption(
+                "평일 16:10에 자동으로 도는 텔레그램 알림(GitHub Actions)이 감시하는 "
+                "종목 목록입니다. 여기서 저장하면 저장소의 alerts/watchlist.json이 "
+                "바로 바뀌고, 다음 실행부터 적용됩니다. '강도'는 시장별 기본값을 "
+                "덮어쓸 때만 바꾸면 됩니다 — 국내 주식은 기본이 'BH보정 필요'(검증된 "
+                "신호만 알림), 코인은 기본이 '즉시 알림'(검증 없이 원시 신호 바로 "
+                "알림)입니다."
+            )
+
+            if "watchlist_sha" not in st.session_state or st.button("감시리스트 새로고침"):
+                try:
+                    _items, _sha = fetch_watchlist(_token, WATCHLIST_REPO, WATCHLIST_PATH)
+                    st.session_state["watchlist_items"] = _items
+                    st.session_state["watchlist_sha"] = _sha
+                except GitHubSyncError as e:
+                    st.error(str(e))
+                    st.session_state.pop("watchlist_items", None)
+                    st.session_state.pop("watchlist_sha", None)
+
+            if "watchlist_items" in st.session_state:
+                _df = pd.DataFrame(
+                    items_to_rows(st.session_state["watchlist_items"]),
+                    columns=["시장", "종목코드", "이름", "강도"],
+                )
+
+                _edited = st.data_editor(
+                    _df,
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    column_config={
+                        "시장": st.column_config.SelectboxColumn(options=["krx", "upbit"], required=True),
+                        "종목코드": st.column_config.TextColumn(required=True),
+                        "이름": st.column_config.TextColumn(),
+                        "강도": st.column_config.SelectboxColumn(
+                            options=list(STRENGTH_LABELS.values()), required=True,
+                        ),
+                    },
+                    key="watchlist_editor",
+                )
+
+                if st.button("감시리스트 저장", type="primary"):
+                    _new_items = rows_to_items(_edited.to_dict("records"))
+                    try:
+                        new_sha = update_watchlist(
+                            _token, WATCHLIST_REPO, _new_items, st.session_state["watchlist_sha"],
+                            WATCHLIST_PATH,
+                        )
+                        st.session_state["watchlist_items"] = _new_items
+                        st.session_state["watchlist_sha"] = new_sha
+                        st.success(f"저장했습니다 ({len(_new_items)}개 종목). 다음 알림 실행부터 적용됩니다.")
+                    except GitHubSyncError as e:
+                        st.error(str(e))
 
     run_clicked = st.button("검증 실행", type="primary", use_container_width=True)
 
